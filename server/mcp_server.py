@@ -1,18 +1,23 @@
 #!/usr/bin/env python3
 """
-Complete Fixed MCP Server for Subscription Analytics
-WebSocket-based MCP server with proper debugging and formatting
+Remote WebSocket MCP Server for Subscription Analytics
+Enhanced for production deployment with proper error handling
 """
 from dotenv import load_dotenv
 from pathlib import Path
-load_dotenv(Path(__file__).parent / '.env', override=True)
+
+# Load environment first
+env_path = Path(__file__).parent / '.env'
+if env_path.exists():
+    load_dotenv(env_path, override=True)
+
 import asyncio
 import logging
 import sys
 import websockets
 import json
 import os
-from pathlib import Path
+import signal
 from typing import Dict, Any, List
 
 # MCP imports
@@ -29,21 +34,23 @@ except ImportError:
 # Add current directory to path
 sys.path.insert(0, str(Path(__file__).parent))
 
-# Force load .env file first
-from dotenv import load_dotenv
-env_path = Path(__file__).parent / '.env'
-if env_path.exists():
-    load_dotenv(env_path, override=True)
-
 from ai_processor import MultiQueryGeminiProcessor
 from database import DatabaseManager
 from config import load_config
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger("mcp-analytics-server")
+# Enhanced logging for production
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler('/tmp/mcp_server.log') if os.path.exists('/tmp') else logging.NullHandler()
+    ]
+)
+logger = logging.getLogger("remote-mcp-server")
 
-class SubscriptionAnalyticsMCPServer:
-    """Complete MCP Server for subscription analytics"""
+class RemoteSubscriptionAnalyticsMCPServer:
+    """Remote WebSocket MCP Server for subscription analytics"""
     
     def __init__(self):
         self.server = Server("subscription-analytics")
@@ -54,7 +61,7 @@ class SubscriptionAnalyticsMCPServer:
             database_manager=self.db_manager
         )
         
-        # Define available tools for clients
+        # Define available tools for remote clients
         self.tools = [
             Tool(
                 name="natural_language_query",
@@ -127,52 +134,63 @@ class SubscriptionAnalyticsMCPServer:
                     },
                     "required": []
                 }
+            ),
+            Tool(
+                name="get_analytics_by_date_range",
+                description="Get comprehensive analytics for a specific date range",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "start_date": {
+                            "type": "string",
+                            "description": "Start date in YYYY-MM-DD format"
+                        },
+                        "end_date": {
+                            "type": "string",
+                            "description": "End date in YYYY-MM-DD format"
+                        }
+                    },
+                    "required": ["start_date", "end_date"]
+                }
             )
         ]
+        
+        logger.info(f"🔧 Remote MCP server initialized with {len(self.tools)} tools")
     
-    async def _execute_tool(self, name: str, arguments: Dict[str, Any]) -> str:
-        """Execute a tool and return formatted result - DEBUG VERSION"""
+    async def execute_tool(self, name: str, arguments: Dict[str, Any]) -> str:
+        """Execute a tool and return formatted result"""
+        logger.info(f"🔧 Executing tool: {name} with args: {arguments}")
         
-        logger.info(f"🔧 EXECUTING TOOL: {name}")
-        logger.info(f"🔧 ARGUMENTS: {arguments}")
-        
-        if name == "natural_language_query":
-            return await self._handle_natural_language_query(arguments)
-        
-        # For direct database tools, call the database manager
-        if hasattr(self.db_manager, name):
-            logger.info(f"🔧 Calling database method: {name}")
-            db_method = getattr(self.db_manager, name)
+        try:
+            if name == "natural_language_query":
+                return await self._handle_natural_language_query(arguments)
             
-            try:
+            # For direct database tools, call the database manager
+            if hasattr(self.db_manager, name):
+                db_method = getattr(self.db_manager, name)
                 result = await db_method(**arguments)
-                logger.info(f"🔧 RAW DATABASE RESULT: {result}")
-                logger.info(f"🔧 RESULT TYPE: {type(result)}")
-                
                 formatted = self._format_result(name, result)
-                logger.info(f"🔧 FORMATTED RESULT: {formatted}")
-                
+                logger.info(f"✅ Tool {name} completed successfully")
                 return formatted
-            except Exception as e:
-                error_msg = f"Database method {name} failed: {str(e)}"
-                logger.error(error_msg)
-                import traceback
-                traceback.print_exc()
-                return f"❌ Error: {error_msg}"
-        
-        return f"❌ Unknown tool: {name}"
+            
+            return f"❌ Unknown tool: {name}"
+            
+        except Exception as e:
+            error_msg = f"Tool execution failed: {str(e)}"
+            logger.error(f"❌ {error_msg}", exc_info=True)
+            return f"❌ Error: {error_msg}"
     
     async def _handle_natural_language_query(self, arguments: Dict[str, Any]) -> str:
         """Handle natural language queries using AI processor"""
         query = arguments.get("query", "")
-        logger.info(f"🤖 Processing natural language query: '{query}'")
+        logger.info(f"🤖 Processing NL query: '{query}'")
         
         try:
             # Parse query with AI
             tool_calls = await self.ai_processor.parse_natural_language_query(query)
             
             if not tool_calls:
-                return "I couldn't understand your query. Please try rephrasing it."
+                return "❌ I couldn't understand your query. Please try rephrasing it."
             
             # Execute the suggested tool calls
             results = []
@@ -180,7 +198,7 @@ class SubscriptionAnalyticsMCPServer:
                 tool_name = tool_call['tool']
                 parameters = tool_call.get('parameters', {})
                 
-                logger.info(f"🔧 Executing suggested tool: {tool_name} with params: {parameters}")
+                logger.info(f"🔧 Executing AI-suggested tool: {tool_name}")
                 
                 if hasattr(self.db_manager, tool_name):
                     db_method = getattr(self.db_manager, tool_name)
@@ -194,19 +212,11 @@ class SubscriptionAnalyticsMCPServer:
                 return f"🔍 **Combined Analysis for:** '{query}'\n\n" + "\n\n---\n\n".join(results)
         
         except Exception as e:
-            logger.error(f"Natural language query failed: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.error(f"❌ Natural language query failed: {e}", exc_info=True)
             return f"❌ Query processing failed: {str(e)}"
     
     def _format_result(self, tool_name: str, data: Any) -> str:
-        """Format results for display - DEBUG VERSION"""
-        
-        # Debug logging
-        logger.info(f"🎨 Formatting result for {tool_name}")
-        logger.info(f"🎨 Data type: {type(data)}")
-        logger.info(f"🎨 Data content: {data}")
-        
+        """Format results for display"""
         if isinstance(data, dict) and "error" in data:
             return f"❌ **{tool_name.replace('_', ' ').title()}**: {data['error']}"
         
@@ -222,6 +232,8 @@ class SubscriptionAnalyticsMCPServer:
             return self._format_subscription_data(data)
         elif "payment" in tool_name:
             return self._format_payment_data(data)
+        elif "analytics" in tool_name:
+            return self._format_analytics_data(data)
         else:
             return self._format_generic_data(data, tool_name)
     
@@ -234,13 +246,13 @@ class SubscriptionAnalyticsMCPServer:
             lines.append(f"📝 Total Subscriptions: {data['total_subscriptions']:,}")
         if 'total_payments' in data:
             lines.append(f"💳 Total Payments: {data['total_payments']:,}")
+        if 'database' in data:
+            lines.append(f"🏢 Database: {data['database']}")
         
         return "\n".join(lines)
     
     def _format_subscription_summary(self, data: Dict[str, Any]) -> str:
-        """Format subscription summary data specifically"""
-        logger.info(f"🎨 Formatting subscription summary: {data}")
-        
+        """Format subscription summary data"""
         lines = []
         period = data.get('period_days', 'unknown')
         lines.append(f"📈 **SUBSCRIPTION SUMMARY ({period} days)**")
@@ -258,10 +270,6 @@ class SubscriptionAnalyticsMCPServer:
             lines.append(f"💳 Total Payments: {pay_data.get('total_payments', 0):,}")
             lines.append(f"📈 Success Rate: {pay_data.get('success_rate', '0%')}")
             lines.append(f"💰 Total Revenue: {pay_data.get('total_revenue', '$0.00')}")
-        
-        # Show summary if available
-        if 'summary' in data:
-            lines.append(f"\n📝 Summary: {data['summary']}")
         
         return "\n".join(lines)
     
@@ -295,6 +303,27 @@ class SubscriptionAnalyticsMCPServer:
         
         return "\n".join(lines)
     
+    def _format_analytics_data(self, data: Dict[str, Any]) -> str:
+        """Format analytics data for date ranges"""
+        lines = []
+        start_date = data.get('start_date', 'unknown')
+        end_date = data.get('end_date', 'unknown')
+        lines.append(f"📊 **ANALYTICS REPORT ({start_date} to {end_date})**")
+        
+        if 'subscriptions' in data:
+            sub_data = data['subscriptions']
+            lines.append(f"📈 **Subscriptions:**")
+            lines.append(f"   🆕 New: {sub_data.get('new_subscriptions', 0):,}")
+        
+        if 'payments' in data:
+            pay_data = data['payments']
+            lines.append(f"💳 **Payments:**")
+            lines.append(f"   📊 Total: {pay_data.get('total_payments', 0):,}")
+            lines.append(f"   📈 Success Rate: {pay_data.get('success_rate', '0%')}")
+            lines.append(f"   💰 Revenue: {pay_data.get('total_revenue', '$0.00')}")
+        
+        return "\n".join(lines)
+    
     def _format_generic_data(self, data: Dict[str, Any], tool_name: str) -> str:
         """Format generic data"""
         title = tool_name.replace('_', ' ').title()
@@ -307,10 +336,8 @@ class SubscriptionAnalyticsMCPServer:
         
         return "\n".join(lines)
 
-# Authentication function
 def authenticate_client(api_key: str) -> bool:
     """Authenticate client API key"""
-    # Get API keys from environment
     valid_keys = set()
     
     # Primary API key
@@ -324,43 +351,43 @@ def authenticate_client(api_key: str) -> bool:
         if extra_key:
             valid_keys.add(extra_key)
     
-    # Fallback for local development only
-    if not valid_keys:
+    # Development fallback
+    if not valid_keys and os.getenv('ENVIRONMENT', 'production') == 'development':
         valid_keys.add('test_key_123')
-        logger.warning("⚠️ No API keys found in .env, using fallback test key")
+        logger.warning("⚠️ Using development fallback API key")
     
-    logger.info(f"🔑 Configured API keys: {[key[:8] + '...' for key in valid_keys]}")
-    return api_key in valid_keys
+    is_valid = api_key in valid_keys
+    logger.info(f"🔑 Authentication attempt: {'✅ Success' if is_valid else '❌ Failed'}")
+    return is_valid
 
-# WebSocket handler
-async def handle_websocket_client(websocket):
-    """Handle WebSocket connections - FIXED to stay connected"""
-    logger.info(f"🔌 New WebSocket connection from {websocket.remote_address}")
+async def handle_websocket_client(websocket, path):
+    """Handle WebSocket connections from remote clients"""
+    client_addr = websocket.remote_address if hasattr(websocket, 'remote_address') else 'unknown'
+    logger.info(f"🔌 New WebSocket connection from {client_addr}")
     
     server_instance = None
     
     try:
-        # First message should be authentication
+        # Authentication handshake
         auth_message = await websocket.recv()
         auth_data = json.loads(auth_message)
         
         if not authenticate_client(auth_data.get('api_key', '')):
             await websocket.send(json.dumps({"error": "Authentication failed"}))
+            logger.warning(f"❌ Authentication failed for {client_addr}")
             return
         
-        logger.info("✅ Client authenticated successfully")
-        await websocket.send(json.dumps({"status": "authenticated"}))
+        logger.info(f"✅ Client {client_addr} authenticated successfully")
+        await websocket.send(json.dumps({"status": "authenticated", "server": "remote-mcp-analytics"}))
         
-        # Create server instance ONCE for this connection
-        server_instance = SubscriptionAnalyticsMCPServer()
-        logger.info("🔧 Server instance created")
+        # Create server instance for this connection
+        server_instance = RemoteSubscriptionAnalyticsMCPServer()
+        logger.info(f"🔧 Server instance created for {client_addr}")
         
-        # Proper message loop that stays connected
-        while True:
+        # Main message loop
+        async for message in websocket:
             try:
-                # Wait for next message
-                message = await websocket.recv()
-                logger.info(f"📨 Received message: {message}")
+                logger.info(f"📨 Received from {client_addr}: {message[:100]}...")
                 
                 data = json.loads(message)
                 
@@ -379,65 +406,111 @@ async def handle_websocket_client(websocket):
                     name = params.get('name')
                     arguments = params.get('arguments', {})
                     
-                    logger.info(f"🔧 Executing tool: {name} with args: {arguments}")
-                    result = await server_instance._execute_tool(name, arguments)
+                    logger.info(f"🔧 {client_addr} executing: {name}")
+                    result = await server_instance.execute_tool(name, arguments)
                     response = {"result": result}
                 
+                elif data.get('method') == 'ping':
+                    response = {"result": "pong", "timestamp": data.get('timestamp')}
+                
                 else:
-                    response = {"error": "Unknown method"}
+                    response = {"error": f"Unknown method: {data.get('method')}"}
                 
-                logger.info(f"📤 Sending response: {str(response)[:200]}...")
                 await websocket.send(json.dumps(response))
-                logger.info("✅ Response sent successfully")
+                logger.info(f"📤 Response sent to {client_addr}")
                 
-            except websockets.exceptions.ConnectionClosed:
-                logger.info("🔌 Client disconnected normally")
-                break
             except json.JSONDecodeError as e:
-                logger.error(f"❌ Invalid JSON: {e}")
+                logger.error(f"❌ Invalid JSON from {client_addr}: {e}")
                 await websocket.send(json.dumps({"error": "Invalid JSON"}))
             except Exception as e:
-                logger.error(f"❌ Error handling message: {e}")
-                import traceback
-                traceback.print_exc()
+                logger.error(f"❌ Error handling message from {client_addr}: {e}", exc_info=True)
                 await websocket.send(json.dumps({"error": str(e)}))
     
     except websockets.exceptions.ConnectionClosed:
-        logger.info("🔌 WebSocket connection closed during auth")
+        logger.info(f"🔌 Client {client_addr} disconnected normally")
     except Exception as e:
-        logger.error(f"❌ WebSocket error: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.error(f"❌ WebSocket error with {client_addr}: {e}", exc_info=True)
     finally:
-        logger.info("🧹 Cleaning up connection")
+        logger.info(f"🧹 Cleaning up connection for {client_addr}")
 
-# WebSocket mode for remote clients
-async def run_websocket_mode():
-    """Run MCP server in WebSocket mode for remote clients"""
+async def run_remote_websocket_server():
+    """Run the remote WebSocket MCP server"""
+    # Get configuration from environment
     host = os.getenv('MCP_HOST', '0.0.0.0')
-    port = int(os.getenv('MCP_PORT', '8765'))
+    port = int(os.getenv('PORT', os.getenv('MCP_PORT', '8765')))
     
-    # Get configured API key for display
-    configured_key = os.getenv('ANALYTICS_API_KEY', 'test_key_123')
+    # Verify required environment variables
+    required_vars = ['DB_HOST', 'DB_PASSWORD', 'GEMINI_API_KEY', 'ANALYTICS_API_KEY']
+    missing_vars = [var for var in required_vars if not os.getenv(var)]
     
-    logger.info(f"🌐 Starting MCP server on WebSocket ws://{host}:{port}")
+    if missing_vars:
+        logger.error(f"❌ Missing required environment variables: {missing_vars}")
+        sys.exit(1)
     
-    async with websockets.serve(handle_websocket_client, host, port):
-        logger.info("✅ MCP server is running and ready for connections")
-        logger.info(f"🔗 Clients can connect to: ws://{host}:{port}")
-        logger.info(f"🔑 Configured API key: {configured_key[:8]}...")
-        await asyncio.Future()  # Run forever
+    configured_key = os.getenv('ANALYTICS_API_KEY', 'NOT_SET')
+    
+    logger.info("🚀 Starting Remote WebSocket MCP Server")
+    logger.info(f"🌐 Host: {host}:{port}")
+    logger.info(f"🔑 API Key: {configured_key[:8]}...")
+    logger.info(f"🗄️  Database: {os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}")
+    
+    # Setup graceful shutdown
+    stop_event = asyncio.Event()
+    
+    def signal_handler():
+        logger.info("🛑 Received shutdown signal")
+        stop_event.set()
+    
+    # Register signal handlers
+    for sig in [signal.SIGTERM, signal.SIGINT]:
+        signal.signal(sig, lambda s, f: signal_handler())
+    
+    try:
+        # Start WebSocket server
+        async with websockets.serve(
+            handle_websocket_client, 
+            host, 
+            port,
+            ping_interval=20,
+            ping_timeout=10,
+            close_timeout=10
+        ):
+            logger.info("✅ Remote MCP server is running and ready for connections")
+            logger.info(f"🔗 Clients can connect to: ws://{host}:{port}")
+            logger.info("📋 Available tools: natural_language_query, get_database_status, get_subscription_summary, etc.")
+            
+            # Wait for shutdown signal
+            await stop_event.wait()
+            
+    except Exception as e:
+        logger.error(f"❌ Server startup failed: {e}", exc_info=True)
+        sys.exit(1)
 
 async def main():
-    """Main entry point"""
-    logger.info("🚀 Starting Subscription Analytics MCP Server")
-    await run_websocket_mode()
-
-if __name__ == "__main__":
+    """Main entry point for remote WebSocket MCP server"""
+    logger.info("🚀 Initializing Remote Subscription Analytics MCP Server")
+    
     try:
-        asyncio.run(main())
+        # Test database connection on startup
+        config = load_config()
+        db_manager = DatabaseManager(config)
+        db_status = await db_manager.get_database_status()
+        
+        if db_status.get('status') == 'connected':
+            logger.info("✅ Database connection verified")
+        else:
+            logger.warning(f"⚠️ Database connection issue: {db_status.get('error', 'Unknown')}")
+        
+        # Start the server
+        await run_remote_websocket_server()
+        
     except KeyboardInterrupt:
         logger.info("🛑 Server stopped by user")
     except Exception as e:
-        logger.error(f"❌ Server error: {e}")
+        logger.error(f"❌ Server error: {e}", exc_info=True)
         sys.exit(1)
+    finally:
+        logger.info("👋 Remote MCP server shutdown complete")
+
+if __name__ == "__main__":
+    asyncio.run(main())

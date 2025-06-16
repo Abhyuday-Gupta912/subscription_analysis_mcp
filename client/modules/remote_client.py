@@ -1,19 +1,20 @@
-# ===== client/modules/remote_client.py =====
 #!/usr/bin/env python3
 """
-Remote MCP Client - FINAL VERSION
+Remote MCP Client - FIXED VERSION with correct class name
 Connects to remote MCP server via WebSocket with proper error handling
 """
 import asyncio
 import json
 import logging
 import websockets
+import ssl
 from typing import Dict, Any, List
+from websockets.exceptions import ConnectionClosed, ConnectionClosedError, ConnectionClosedOK
 
 logger = logging.getLogger("remote-mcp-client")
 
 class RemoteMCPClient:
-    """Client that connects to your remote MCP server"""
+    """Client that connects to your remote MCP server - Fixed class name"""
     
     def __init__(self, config: Dict[str, Any]):
         self.config = config
@@ -22,54 +23,91 @@ class RemoteMCPClient:
         self.websocket = None
         self.connected = False
         
+        # Connection settings
+        self.timeout = config.get('timeout', 90)
+        self.ping_interval = config.get('ping_interval', 20)
+        self.retry_attempts = config.get('retry_attempts', 3)
+        self.reconnect_delay = 2
+        
+        # SSL context for wss:// connections
+        self.ssl_context = None
+        if self.server_url.startswith('wss://'):
+            self.ssl_context = ssl.create_default_context()
+        
         logger.info(f"🔗 Remote MCP client configured for: {self.server_url}")
     
     async def connect(self):
-        """Connect to remote MCP server"""
+        """Connect to remote MCP server with retry logic"""
         if self.connected:
             return
         
         if not self.api_key:
             raise ValueError("API Key is required to connect to remote server")
         
-        try:
-            logger.info(f"🔌 Connecting to remote MCP server at {self.server_url}")
+        for attempt in range(self.retry_attempts):
+            try:
+                logger.info(f"🔌 Connection attempt {attempt + 1}/{self.retry_attempts} to {self.server_url}")
+                
+                # Create WebSocket connection
+                connect_kwargs = {
+                    'ping_interval': self.ping_interval,
+                    'ping_timeout': 10,
+                    'close_timeout': 10
+                }
+                
+                if self.ssl_context:
+                    connect_kwargs['ssl'] = self.ssl_context
+                
+                self.websocket = await asyncio.wait_for(
+                    websockets.connect(self.server_url, **connect_kwargs),
+                    timeout=self.timeout
+                )
+                
+                # Send authentication
+                auth_message = {
+                    "api_key": self.api_key,
+                    "client_type": "mcp_client",
+                    "version": "1.0.0"
+                }
+                
+                await self.websocket.send(json.dumps(auth_message))
+                
+                # Wait for auth response
+                response = await asyncio.wait_for(
+                    self.websocket.recv(),
+                    timeout=10
+                )
+                auth_result = json.loads(response)
+                
+                if "error" in auth_result:
+                    raise ConnectionError(f"Authentication failed: {auth_result['error']}")
+                
+                self.connected = True
+                logger.info("✅ Connected and authenticated with remote MCP server")
+                return
+                
+            except asyncio.TimeoutError:
+                logger.warning(f"⏰ Connection timeout on attempt {attempt + 1}")
+            except ConnectionRefusedError:
+                logger.warning(f"🚫 Connection refused on attempt {attempt + 1}")
+            except Exception as e:
+                logger.warning(f"❌ Connection failed on attempt {attempt + 1}: {e}")
             
-            # Simple connection (based on working test pattern)
-            self.websocket = await websockets.connect(self.server_url)
-            
-            # Send authentication
-            auth_message = {
-                "api_key": self.api_key,
-                "client_type": "mcp_client",
-                "version": "1.0.0"
-            }
-            await self.websocket.send(json.dumps(auth_message))
-            
-            # Wait for auth response
-            response = await self.websocket.recv()
-            auth_result = json.loads(response)
-            
-            if "error" in auth_result:
-                raise ConnectionError(f"Authentication failed: {auth_result['error']}")
-            
-            self.connected = True
-            logger.info("✅ Connected and authenticated with remote MCP server")
-            
-        except websockets.exceptions.ConnectionClosedError:
-            raise ConnectionError("Connection to remote server was closed unexpectedly")
-        except ConnectionRefusedError:
-            raise ConnectionError(f"Connection refused. Is the MCP server running on {self.server_url}?")
-        except Exception as e:
-            raise ConnectionError(f"Failed to connect to remote server: {str(e)}")
+            if attempt < self.retry_attempts - 1:
+                wait_time = self.reconnect_delay * (2 ** attempt)
+                logger.info(f"⏳ Waiting {wait_time}s before retry...")
+                await asyncio.sleep(wait_time)
+        
+        raise ConnectionError(f"Failed to connect after {self.retry_attempts} attempts")
     
     async def disconnect(self):
         """Safely disconnect from MCP server"""
         if self.websocket:
             try:
                 await self.websocket.close()
-            except Exception:
-                pass  # Ignore any disconnect errors
+                await self.websocket.wait_closed()
+            except Exception as e:
+                logger.debug(f"Disconnect cleanup error (safe to ignore): {e}")
         
         self.websocket = None
         self.connected = False
@@ -85,10 +123,13 @@ class RemoteMCPClient:
             await self.websocket.send(json.dumps(message))
             
             # Wait for response
-            response = await self.websocket.recv()
+            response = await asyncio.wait_for(
+                self.websocket.recv(),
+                timeout=self.timeout
+            )
             return json.loads(response)
             
-        except websockets.exceptions.ConnectionClosed:
+        except (ConnectionClosed, ConnectionClosedError, ConnectionClosedOK):
             self.connected = False
             raise ConnectionError("Connection to server was lost")
         except json.JSONDecodeError as e:
@@ -140,10 +181,28 @@ class RemoteMCPClient:
         """Get subscription summary from remote server"""
         return await self.call_tool("get_subscription_summary", {"days": days})
 
+# For backwards compatibility
+EnhancedRemoteMCPClient = RemoteMCPClient
+
 if __name__ == "__main__":
     import sys
     import os
     sys.path.insert(0, os.path.dirname(__file__))
     
-    import asyncio
+    async def test_remote_client():
+        config = {
+            'server_url': 'ws://localhost:8765',
+            'api_key': 'test_key_123'
+        }
+        
+        client = RemoteMCPClient(config)
+        try:
+            await client.connect()
+            result = await client.get_database_status()
+            print(f"Test result: {result}")
+        except Exception as e:
+            print(f"Test failed: {e}")
+        finally:
+            await client.disconnect()
+    
     asyncio.run(test_remote_client())

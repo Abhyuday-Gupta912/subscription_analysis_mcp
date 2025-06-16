@@ -1,0 +1,13 @@
+# railway.toml - Railway deployment configuration
+[build]
+builder = "dockerfile"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+startCommand = "python server/mcp_server.py"
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 3
+
+# Health check endpoint (optional)
+healthcheckPath = "/health"
+healthcheckTimeout = 300
