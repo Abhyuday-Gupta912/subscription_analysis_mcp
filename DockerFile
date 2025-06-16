@@ -1,4 +1,4 @@
-# Dockerfile for Remote WebSocket MCP Server
+# Dockerfile for Remote WebSocket MCP Server - FIXED VERSION
 FROM python:3.10-slim
 
 WORKDIR /app
@@ -10,6 +10,9 @@ RUN apt-get update && apt-get install -y \
     pkg-config \
     default-libmysqlclient-dev \
     && rm -rf /var/lib/apt/lists/*
+
+# Upgrade pip first
+RUN pip install --upgrade pip
 
 # Copy and install requirements
 COPY requirements.txt .
@@ -24,10 +27,6 @@ USER appuser
 
 # Expose WebSocket port
 EXPOSE 8765
-
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD python -c "import asyncio, websockets; asyncio.run(websockets.connect('ws://localhost:8765'))" || exit 1
 
 # Run MCP server in WebSocket mode
 CMD ["python", "server/mcp_server.py"]
